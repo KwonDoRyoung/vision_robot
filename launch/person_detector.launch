@@ -5,7 +5,7 @@
         args="$(find vision_robot)/scripts/person_detector_node.py"
         output="screen">
     <param name="image_topic" value="/camera/color/image_raw"/>
-    <param name="engine_path" value="$(find yolo26_detection)/src/yolo26n.engine"/>
+    <param name="engine_path" value="$(find vision_robot)/yolo26n.engine"/>
     <param name="confidence_threshold" value="0.5"/>
     <param name="nms_threshold" value="0.45"/>
     <param name="input_size" value="640"/>
