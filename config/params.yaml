@@ -1,0 +1,39 @@
+# Vision Robot Parameters
+
+# 센서 토픽
+camera_rgb_topic: "/camera/color/image_raw"
+camera_depth_topic: "/camera/depth/image_rect_raw"
+lidar_topic: "/rslidar_points"
+camera_info_topic: "/camera/color/camera_info"
+
+# 좌표계 (로봇베이스 중심 기준)
+camera_rgb_offset: [0.28, 0.01, 0.115]
+camera_depth_offset: [0.28, -0.01, 0.115]
+lidar_offset: [0.0, 0.0, 0.22]
+
+# 객체 탐지 (Phase 2)
+detector:
+  model_path: ""            # TensorRT .engine 파일 경로
+  input_size: 640           # YOLO 입력 해상도
+  confidence_threshold: 0.5
+  nms_threshold: 0.45
+  target_class: 0           # person class
+  frame_buffer_n: 3         # N 프레임 유지
+
+# LiDAR-카메라 융합 (Phase 3)
+fusion:
+  sample_count: 40          # S개 포인트 샘플링
+  outlier_threshold: 1.5    # median 기반 이상치 제거 배수
+
+# 트래커 (Phase 3)
+tracker:
+  max_distance: 1.0         # 객체 매칭 최대 거리 (m)
+  max_lost_frames: 10       # 추적 실패 시 유지 프레임 수
+  velocity_smoothing: 0.3   # 이동 평균 필터 계수
+
+# 회피 정책 (Phase 4)
+policy:
+  front_angle: 30.0         # 정면 영역 각도 (좌우 ±도)
+  distance_caution: 3.0     # 주의 거리 (m)
+  distance_warning: 2.0     # 경고 거리 (m)
+  distance_critical: 1.0    # 긴급 거리 (m)
