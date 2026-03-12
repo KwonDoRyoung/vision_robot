@@ -28,13 +28,88 @@
 
 ---
 
+## 패키지 구조
+
+본 프로젝트는 **catkin 패키지**로 구성하며, 심링크를 통해 catkin 워크스페이스에 연결한다.
+
+```
+프로젝트 경로: /home/irop/projects/vision_robot/
+심링크: /home/irop/catkin_ws/src/vision_robot → /home/irop/projects/vision_robot/
+```
+
+### 심링크 생성 및 빌드
+```bash
+ln -s /home/irop/projects/vision_robot /home/irop/catkin_ws/src/vision_robot
+cd /home/irop/catkin_ws && catkin_make
+source devel/setup.bash
+```
+
+### 디렉토리 구조
+```
+vision_robot/
+├── CMakeLists.txt                 # catkin 빌드 설정
+├── package.xml                    # catkin 패키지 매니페스트
+├── .gitignore
+├── RESEARCH.md
+├── RESEARCH_NEW.md
+├── msg/
+│   ├── TrackedPerson.msg          # 개별 추적 객체 메시지
+│   └── TrackedPersonArray.msg     # 추적 객체 배열 메시지
+├── launch/
+│   └── vision_robot.launch        # 전체 노드 실행
+├── scripts/                       # 실행 가능한 ROS 노드 (#!/usr/bin/env python3)
+│   ├── person_detector_node.py    # Phase 2: YOLO 객체 탐지
+│   ├── person_tracker_node.py     # Phase 3: 위치/속도 추정
+│   └── avoidance_policy_node.py   # Phase 4: 회피 정책
+├── src/                           # Python 모듈 (import용, 직접 실행 X)
+│   └── vision_robot/
+│       ├── __init__.py
+│       ├── projection.py          # LiDAR→이미지 투영
+│       ├── tracker.py             # 객체 트래킹
+│       └── config.py              # 설정값 관리
+└── config/
+    └── params.yaml                # ROS 파라미터
+```
+
+### 커스텀 메시지 정의
+
+**TrackedPerson.msg**
+```
+std_msgs/Header header
+uint32 id
+string class_id
+float32 score
+geometry_msgs/Point position       # 로봇 기준 3D 위치 (x, y, z)
+geometry_msgs/Vector3 velocity     # 속도 벡터 (vx, vy, vz)
+float64 distance                   # 로봇까지 거리
+float64 confidence                 # 탐지 신뢰도
+bool valid
+```
+
+**TrackedPersonArray.msg**
+```
+std_msgs/Header header
+TrackedPerson[] persons
+```
+
+### 기존 패키지와의 관계
+- `obj_position_estimation` (RepresentativeObject): 기존 위치 추정 패키지 참고
+- `obj_velocity_estimation` (RepresentativeVelocity): 기존 속도 추정 패키지 참고
+- 본 패키지는 위 두 패키지의 기능을 **통합**하여 단일 파이프라인으로 구현
+
+---
+
 ## 개발 단계
 
 ### Phase 1: 환경 구축 및 센서 검증
-> 목표: 개발 환경을 세팅하고 각 센서 데이터가 정상 수신되는지 확인
+> 목표: catkin 패키지 구성, 개발 환경 세팅, 센서 데이터 정상 수신 확인
 
+- [ ] catkin 패키지 기본 파일 생성 (`package.xml`, `CMakeLists.txt`)
+- [ ] catkin_ws/src에 심링크 생성 및 빌드 확인
+- [ ] 커스텀 메시지 정의 및 빌드 확인 (`TrackedPerson.msg`, `TrackedPersonArray.msg`)
 - [ ] Python venv 환경 구성 (ROS1 호환)
-- [ ] 필수 패키지 설치 (ultralytics, tensorrt, numpy, opencv, ros 관련)
+  - venv 생성 시 `--system-site-packages` 옵션으로 ROS 패키지 접근 유지
+- [ ] 필수 패키지 설치 (ultralytics, tensorrt, numpy, opencv)
 - [ ] 각 센서 토픽 수신 확인 (rostopic echo)
   - RGB 이미지 정상 수신
   - Depth 이미지 정상 수신
@@ -44,7 +119,10 @@
   - LiDAR → 카메라 extrinsic 변환 행렬 산출/검증
 - [ ] 센서 데이터 시간 동기화 방식 결정 (approximate time synchronizer)
 
-**검증**: rviz에서 LiDAR 포인트를 카메라 이미지 위에 투영하여 정합 확인
+**검증**:
+1. `catkin_make` 빌드 성공
+2. `rosmsg show vision_robot/TrackedPerson` 으로 메시지 확인
+3. rviz에서 LiDAR 포인트를 카메라 이미지 위에 투영하여 정합 확인
 
 ---
 
@@ -54,9 +132,10 @@
 - [ ] YOLOv11n (또는 최신 Ultralytics 모델) 선정 및 TensorRT 변환
   - `.pt` → `.engine` 변환 (Jetson 최적화, FP16)
   - 입력 해상도 결정 (640x640 권장)
-- [ ] ROS 노드 구현: `person_detector_node`
+  - 참고: 기존 `yolo26n.engine` 파일이 catkin_ws/src에 존재
+- [ ] ROS 노드 구현: `scripts/person_detector_node.py`
   - Subscribe: `/camera/color/image_raw` (sensor_msgs/Image)
-  - Publish: `/detection/persons` (커스텀 메시지 또는 vision_msgs/Detection2DArray)
+  - Publish: `/detection/persons` (vision_msgs/Detection2DArray)
   - 클래스 필터링: person(class 0)만 발행
 - [ ] N 프레임 이전 결과 유지 로직 구현
   - 현재 프레임에서 미탐지된 객체를 N 프레임(설정 가능) 동안 유지
@@ -73,7 +152,8 @@
 > 목표: 탐지된 사람의 3D 위치와 이동 속도를 추정
 
 #### 3-1. LiDAR 포인트 → 2D 이미지 투영
-- [ ] LiDAR 3D 포인트를 카메라 이미지 평면에 투영하는 모듈 구현
+- [ ] `src/vision_robot/projection.py` 모듈 구현
+  - LiDAR 3D 포인트를 카메라 이미지 평면에 투영
   - 변환 순서: LiDAR 좌표 → 로봇 베이스 → 카메라 좌표 → 이미지 좌표
   - T_lidar_to_base, T_base_to_cam, K(intrinsic) 활용
 - [ ] bounding box 내부 LiDAR 포인트 필터링
@@ -89,24 +169,17 @@
   - bbox 중심 영역의 depth 값 참조
 
 #### 3-3. 객체 속도 추정
-- [ ] 다중 프레임 간 객체 매칭 (간단한 트래커)
+- [ ] `src/vision_robot/tracker.py` 모듈 구현
+  - 다중 프레임 간 객체 매칭 (간단한 트래커)
   - 헝가리안 알고리즘 또는 거리 기반 최근접 매칭
   - 객체 ID 부여 및 유지
 - [ ] 속도 계산
   - 위치 변화량 / 시간 변화량 = 속도 벡터 (vx, vy)
   - 이동 평균 필터로 노이즈 제거
 
-#### 3-4. ROS 노드 구현: `person_tracker_node`
+#### 3-4. ROS 노드 구현: `scripts/person_tracker_node.py`
 - [ ] Subscribe: `/detection/persons`, `/rslidar_points`
-- [ ] Publish: `/tracked_persons` (커스텀 메시지)
-  ```
-  TrackedPerson:
-    uint32 id
-    geometry_msgs/Point position    # 로봇 기준 3D 위치
-    geometry_msgs/Vector3 velocity  # 속도 벡터
-    float64 distance                # 로봇까지 거리
-    float64 confidence              # 탐지 신뢰도
-  ```
+- [ ] Publish: `/tracked_persons` (vision_robot/TrackedPersonArray)
 
 **검증**: 사람이 걸어갈 때 위치와 속도가 합리적인 값으로 출력되는지 확인 (사람 보행 속도 ~1.2m/s)
 
@@ -115,9 +188,9 @@
 ### Phase 4: 회피 정책(Policy) 노드 개발
 > 목표: 추적된 객체 정보를 기반으로 주행 명령을 결정
 
-- [ ] ROS 노드 구현: `avoidance_policy_node`
-  - Subscribe: `/tracked_persons`
-  - Publish: `/policy/cmd` (커스텀 메시지 또는 geometry_msgs/Twist)
+- [ ] ROS 노드 구현: `scripts/avoidance_policy_node.py`
+  - Subscribe: `/tracked_persons` (vision_robot/TrackedPersonArray)
+  - Publish: `/policy/cmd` (geometry_msgs/Twist)
 
 - [ ] 위험 영역 정의
   - 정면 영역: 로봇 진행 방향 기준 좌우 ±30° 이내
@@ -148,7 +221,8 @@
 ### Phase 5: 통합 테스트 및 최적화
 > 목표: 전체 파이프라인을 연결하고 실시간 동작을 검증
 
-- [ ] 전체 노드 launch 파일 작성
+- [ ] 전체 노드 launch 파일 작성 (`launch/vision_robot.launch`)
+  - `roslaunch vision_robot vision_robot.launch` 로 실행 가능
 - [ ] 파이프라인 지연 시간 측정
   - 목표: 센서 입력 → 정책 출력 200ms 이내
 - [ ] 병목 구간 최적화
@@ -163,37 +237,14 @@
 
 ---
 
-## 프로젝트 구조 (예상)
-
-```
-vision_robot/
-├── venv/                          # Python 가상환경
-├── launch/
-│   └── vision_robot.launch        # 전체 노드 실행
-├── msg/
-│   ├── TrackedPerson.msg
-│   └── TrackedPersonArray.msg
-├── src/
-│   ├── person_detector_node.py    # Phase 2: YOLO 객체 탐지
-│   ├── person_tracker_node.py     # Phase 3: 위치/속도 추정
-│   ├── avoidance_policy_node.py   # Phase 4: 회피 정책
-│   └── utils/
-│       ├── projection.py          # LiDAR→이미지 투영
-│       ├── tracker.py             # 객체 트래킹
-│       └── config.py              # 설정값 관리
-├── config/
-│   └── params.yaml                # ROS 파라미터
-├── RESEARCH.md
-└── RESEARCH_NEW.md
-```
-
----
-
 ## 주의 사항
-1. **venv 사용 필수** - ROS1 Python 경로와 충돌 주의
-2. **단위/기능별 검증** - 각 Phase 완료 시 반드시 검증 후 다음 단계 진행
-3. **수정 범위 제한** - `/home/irop/catkin_ws/src` 는 절대 수정 금지, 본 프로젝트 내에서만 수정
-4. **LiDAR 토픽**: `/rslidar_points`
+1. **catkin 패키지 규칙 준수** - `package.xml`, `CMakeLists.txt` 필수, 기존 패키지 컨벤션 따름
+2. **venv 사용** - `python3 -m venv --system-site-packages venv` 로 ROS 패키지 접근 유지
+3. **단위/기능별 검증** - 각 Phase 완료 시 반드시 검증 후 다음 단계 진행
+4. **수정 범위 제한** - `/home/irop/catkin_ws/src` 의 기존 패키지는 절대 수정 금지, 심링크된 본 프로젝트 내에서만 수정
+5. **LiDAR 토픽**: `/rslidar_points`
+6. **실행 스크립트** - `scripts/` 디렉토리에 위치, `chmod +x` 필수, shebang `#!/usr/bin/env python3`
+7. **모듈 코드** - `src/vision_robot/` 디렉토리에 위치, 노드에서 import하여 사용
 
 ---
 
