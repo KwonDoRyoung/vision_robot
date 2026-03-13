@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.0.2)
 project(vision_robot)
 
+catkin_python_setup()
+
 find_package(catkin REQUIRED COMPONENTS
   message_generation
   rospy

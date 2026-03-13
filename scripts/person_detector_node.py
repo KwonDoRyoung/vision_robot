@@ -1,12 +1,16 @@
-#!/usr/bin/env python3
+#!/home/irop/projects/vision_robot/venv/bin/python3
 # -*- coding: utf-8 -*-
 
+import sys
+import cv2
 import rospy
 import numpy as np
 from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose, BoundingBox2D
 from cv_bridge import CvBridge
 from ultralytics import YOLO
+# torchvision C++ ops가 NVIDIA torch와 비호환 → ultralytics 자체 TorchNMS 사용하도록 제거
+sys.modules.pop("torchvision", None)
 
 
 class PersonDetectorNode:
@@ -46,6 +50,7 @@ class PersonDetectorNode:
 
         # Publisher / Subscriber
         self.pub = rospy.Publisher("/detection/persons", Detection2DArray, queue_size=10)
+        self.debug_pub = rospy.Publisher("/detection/debug_image", Image, queue_size=1)
         self.sub = rospy.Subscriber(
             image_topic, Image, self._image_cb, queue_size=1, buff_size=2**24
         )
@@ -128,6 +133,18 @@ class PersonDetectorNode:
             det_array.detections.append(det)
 
         self.pub.publish(det_array)
+
+        # RViz 디버그 이미지 발행
+        if self.debug_pub.get_num_connections() > 0:
+            debug_img = cv_image.copy()
+            for (x1, y1, x2, y2, score) in merged:
+                cv2.rectangle(debug_img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                cv2.putText(debug_img, f"person {score:.2f}", (int(x1), int(y1) - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            try:
+                self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug_img, "bgr8"))
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ #
     # N 프레임 유지 (IoU 기반 frame buffer)

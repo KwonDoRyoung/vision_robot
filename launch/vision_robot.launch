@@ -1,0 +1,27 @@
+<launch>
+  <!-- 공통 파라미터 로드 -->
+  <rosparam file="$(find vision_robot)/config/params.yaml" command="load" ns="person_detector_node"/>
+  <rosparam file="$(find vision_robot)/config/params.yaml" command="load" ns="person_tracker_node"/>
+
+  <!-- Phase 2: 객체 탐지 -->
+  <node name="person_detector_node"
+        pkg="vision_robot"
+        type="person_detector_node.py"
+        output="screen">
+    <param name="image_topic" value="/camera/color/image_raw"/>
+    <param name="engine_path" value="$(find vision_robot)/yolo26n.engine"/>
+    <param name="confidence_threshold" value="0.5"/>
+    <param name="nms_threshold" value="0.45"/>
+    <param name="input_size" value="640"/>
+    <param name="target_class" value="0"/>
+    <param name="frame_buffer_n" value="3"/>
+  </node>
+
+  <!-- Phase 3: 위치/속도 추정 -->
+  <node name="person_tracker_node"
+        pkg="vision_robot"
+        type="person_tracker_node.py"
+        output="screen">
+    <param name="detection_topic" value="/detection/persons"/>
+  </node>
+</launch>

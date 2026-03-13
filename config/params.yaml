@@ -6,30 +6,63 @@ camera_depth_topic: "/camera/depth/image_rect_raw"
 lidar_topic: "/rslidar_points"
 camera_info_topic: "/camera/color/camera_info"
 
-# 좌표계 (로봇베이스 중심 기준)
-camera_rgb_offset: [0.28, 0.01, 0.115]
-camera_depth_offset: [0.28, -0.01, 0.115]
-lidar_offset: [0.0, 0.0, 0.22]
+# 카메라 파라미터 (Intel RealSense D455)
+color_intrinsics: [641.2750244140625, 640.5534057617188, 645.3195190429688, 362.74615478515625]  # fx, fy, cx, cy
+depth_intrinsics: [428.453125, 428.453125, 423.80810546875, 238.1770782470703]  # fx, fy, cx, cy
+depth_scale_factor: 1000  # depth 이미지 값 → 미터 변환 (1000 = mm→m)
+image_cols: 848
+image_rows: 480
+
+# 변환 행렬 (body → sensor, 4x4 row-major)
+# Body: X=전방, Y=좌측, Z=상  |  Camera(OpenCV): X=우측, Y=하, Z=전방
+# R: cam_x=-body_y, cam_y=-body_z, cam_z=body_x
+# t = -R @ sensor_position_in_body
+# Color 카메라 위치: (0.28, 0.01, 0.115) in body
+body_to_camera_color: [0.0, -1.0, 0.0, 0.01,
+                       0.0,  0.0, -1.0, 0.115,
+                       1.0,  0.0, 0.0, -0.28,
+                       0.0,  0.0, 0.0, 1.0]
+# Depth 카메라 위치: (0.28, -0.01, 0.115) in body
+body_to_camera_depth: [0.0, -1.0, 0.0, -0.01,
+                       0.0,  0.0, -1.0, 0.115,
+                       1.0,  0.0, 0.0, -0.28,
+                       0.0,  0.0, 0.0, 1.0]
+# LiDAR 위치: (0.0, 0.0, 0.22) in body, 동일 방향
+body_to_lidar: [1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, -0.22,
+                0.0, 0.0, 0.0, 1.0]
 
 # 객체 탐지 (Phase 2)
 detector:
   model_path: ""            # TensorRT .engine 파일 경로
   input_size: 640           # YOLO 입력 해상도
-  confidence_threshold: 0.5
+  confidence_threshold: 0.8
   nms_threshold: 0.45
   target_class: 0           # person class
   frame_buffer_n: 3         # N 프레임 유지
+
+# Depth 기반 위치 추정 (Phase 3)
+depth:
+  min_value: 0.5            # 최소 유효 depth (m)
+  max_value: 6.0            # 최대 유효 depth (m)
+  roi_margin: 10            # bbox 내부 ROI 마진 (pixels)
 
 # LiDAR-카메라 융합 (Phase 3)
 fusion:
   sample_count: 40          # S개 포인트 샘플링
   outlier_threshold: 1.5    # median 기반 이상치 제거 배수
+  ground_height: 0.2        # 지면 제거 높이 (m)
+  roof_height: 2.0          # 천장 제거 높이 (m)
+  min_lidar_points: 35      # LiDAR 최소 포인트 수 (미만이면 무시)
+  max_lidar_points: 50      # LiDAR 최대 신뢰 포인트 수
 
-# 트래커 (Phase 3)
+# 트래커 - Kalman Filter (Phase 3)
 tracker:
   max_distance: 1.0         # 객체 매칭 최대 거리 (m)
   max_lost_frames: 10       # 추적 실패 시 유지 프레임 수
-  velocity_smoothing: 0.3   # 이동 평균 필터 계수
+  process_noise_pos: 0.05   # KF 위치 프로세스 노이즈 (m)
+  process_noise_vel: 0.5    # KF 속도 프로세스 노이즈 (m/s)
 
 # 회피 정책 (Phase 4)
 policy:
