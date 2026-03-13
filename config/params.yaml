@@ -55,14 +55,17 @@ fusion:
   ground_height: 0.2        # 지면 제거 높이 (m)
   roof_height: 2.0          # 천장 제거 높이 (m)
   min_lidar_points: 35      # LiDAR 최소 포인트 수 (미만이면 무시)
-  max_lidar_points: 50      # LiDAR 최대 신뢰 포인트 수
+  # 서브 박스: 거리별 bbox 내 LiDAR 검색 영역
+  sub_close_ratio: 0.35     # 가까운 거리(0~2m) bbox 대비 비율
+  sub_far_ratio: 0.55       # 먼 거리(2m+) bbox 대비 비율
+  sub_distance_threshold: 2.0  # 가까운/먼 거리 기준 (m)
 
-# 트래커 - Kalman Filter (Phase 3)
+# 트래커 - ByteTrack ID + KF 스무딩 (Phase 3)
 tracker:
-  max_distance: 1.0         # 객체 매칭 최대 거리 (m)
-  max_lost_frames: 10       # 추적 실패 시 유지 프레임 수
-  process_noise_pos: 0.05   # KF 위치 프로세스 노이즈 (m)
-  process_noise_vel: 0.5    # KF 속도 프로세스 노이즈 (m/s)
+  max_lost_frames: 5        # 3D 위치 유지 프레임 수 (ByteTrack이 2D 추적)
+  process_noise_pos: 0.05   # KF 위치 프로세스 노이즈
+  process_noise_vel: 0.5    # KF 속도 프로세스 노이즈
+  measurement_noise: 0.3    # KF 측정 노이즈
 
 # 회피 정책 (Phase 4)
 policy:

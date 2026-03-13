@@ -1,9 +1,12 @@
 #!/home/irop/projects/vision_robot/venv/bin/python3
 # -*- coding: utf-8 -*-
-"""Phase 3: Kalman Filter 기반 LiDAR/Depth 융합 사람 위치·속도 추정 노드.
+"""Phase 3: ByteTrack ID 기반 LiDAR/Depth 융합 사람 위치·속도 추정 노드.
+
+ByteTrack이 2D 이미지에서 ID 추적 → 이 노드는 ID별 3D 위치 추정 + EMA 스무딩.
+거리 기반 서브 박스로 배경 LiDAR 포인트 배제.
 
 Subscribe:
-    /detection/persons (vision_msgs/Detection2DArray)
+    /detection/persons (vision_msgs/Detection2DArray) - hyp.id = ByteTrack track_id
     /camera/depth/image_rect_raw (sensor_msgs/Image)
     /rslidar_points (sensor_msgs/PointCloud2)
 
@@ -19,15 +22,15 @@ from vision_msgs.msg import Detection2DArray
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 from cv_bridge import CvBridge
-import sensor_msgs.point_cloud2 as pc2
 
 from vision_robot.msg import TrackedPerson, TrackedPersonArray
 from vision_robot.config import get_transforms, get_color_intrinsics, get_depth_intrinsics
 from vision_robot.projection import (
+    compute_sub_bbox,
     estimate_position_from_depth,
     estimate_position_from_lidar,
 )
-from vision_robot.tracker import PersonTracker, compute_measurement_noise
+from vision_robot.tracker import TrackedPersonStore
 
 
 class PersonTrackerNode:
@@ -52,23 +55,26 @@ class PersonTrackerNode:
         self.outlier_thresh = rospy.get_param("~fusion/outlier_threshold", 1.5)
         self.ground_height = rospy.get_param("~fusion/ground_height", 0.2)
         self.roof_height = rospy.get_param("~fusion/roof_height", 2.0)
-        self.min_lidar_points = rospy.get_param("~fusion/min_lidar_points", 20)
-        self.max_lidar_points = rospy.get_param("~fusion/max_lidar_points", 50)
+        self.min_lidar_points = rospy.get_param("~fusion/min_lidar_points", 35)
 
-        # 트래커 파라미터
-        max_dist = rospy.get_param("~tracker/max_distance", 1.0)
-        max_lost = rospy.get_param("~tracker/max_lost_frames", 10)
-        process_noise_pos = rospy.get_param("~tracker/process_noise_pos", 0.05)
-        process_noise_vel = rospy.get_param("~tracker/process_noise_vel", 0.5)
+        # 서브 박스 파라미터
+        self.sub_close_ratio = rospy.get_param("~fusion/sub_close_ratio", 0.35)
+        self.sub_far_ratio = rospy.get_param("~fusion/sub_far_ratio", 0.55)
+        self.sub_distance_threshold = rospy.get_param("~fusion/sub_distance_threshold", 2.0)
+
+        # KF 스무딩 파라미터
+        max_lost = rospy.get_param("~tracker/max_lost_frames", 5)
+        q_pos = rospy.get_param("~tracker/process_noise_pos", 0.05)
+        q_vel = rospy.get_param("~tracker/process_noise_vel", 0.5)
+        r_pos = rospy.get_param("~tracker/measurement_noise", 0.3)
 
         # 변환 행렬 / intrinsics
         self.transforms = get_transforms()
         self.K_color = get_color_intrinsics()
         self.K_depth = get_depth_intrinsics()
 
-        # 트래커 (Kalman Filter 기반)
-        self.tracker = PersonTracker(max_dist, max_lost,
-                                     process_noise_pos, process_noise_vel)
+        # ByteTrack ID 기반 KF 스무딩 저장소
+        self.store = TrackedPersonStore(max_lost, q_pos, q_vel, r_pos)
 
         self.bridge = CvBridge()
         self.latest_depth = None
@@ -83,7 +89,7 @@ class PersonTrackerNode:
         rospy.Subscriber(lidar_topic, PointCloud2, self._lidar_cb, queue_size=1, buff_size=2**24)
         rospy.Subscriber(det_topic, Detection2DArray, self._det_cb, queue_size=1)
 
-        rospy.loginfo("PersonTrackerNode 시작 (Kalman Filter)")
+        rospy.loginfo("PersonTrackerNode 시작 (ByteTrack ID + EMA 스무딩)")
         rospy.spin()
 
     def _depth_cb(self, msg):
@@ -117,9 +123,8 @@ class PersonTrackerNode:
         return pts if len(pts) > 0 else None
 
     def _det_cb(self, msg):
-        """탐지 결과 수신 → 위치 추정 → KF 트래킹 → 발행."""
+        """탐지 결과 수신 → 서브 박스 → 3D 위치 추정 → EMA 스무딩 → 발행."""
         stamp = msg.header.stamp
-        detections = []
 
         # depth 이미지 변환
         depth_image = None
@@ -129,7 +134,7 @@ class PersonTrackerNode:
             except Exception:
                 pass
 
-        # LiDAR 포인트 변환 (numpy 직접 파싱 — pc2.read_points 대비 10x+ 빠름)
+        # LiDAR 포인트 변환
         lidar_points = None
         if self.latest_lidar is not None:
             try:
@@ -138,27 +143,41 @@ class PersonTrackerNode:
                 pass
 
         T = self.transforms
+        active_ids = set()
 
         for det in msg.detections:
+            track_id = int(det.results[0].id) if det.results else -1
+            score = det.results[0].score if det.results else 0.0
+
+            # track_id 없으면 무시 (ByteTrack 미할당)
+            if track_id < 0:
+                continue
+
             bbox = (
                 det.bbox.center.x - det.bbox.size_x * 0.5,
                 det.bbox.center.y - det.bbox.size_y * 0.5,
                 det.bbox.center.x + det.bbox.size_x * 0.5,
                 det.bbox.center.y + det.bbox.size_y * 0.5,
             )
-            score = det.results[0].score if det.results else 0.0
+
+            # 이전 거리로 서브 박스 계산
+            prev_dist = self.store.get_prev_distance(track_id)
+            sub_bbox = compute_sub_bbox(
+                bbox, prev_dist,
+                self.sub_close_ratio, self.sub_far_ratio,
+                self.sub_distance_threshold,
+            )
 
             position = None
             distance = None
-            m_noise = 1.0  # 기본 측정 노이즈 (높음)
-
-            # 1차: LiDAR 투영 (min_points 이상일 때만 유효)
             source = "none"
             num_pts = 0
+
+            # 1차: LiDAR 투영 (서브 박스 사용)
             if lidar_points is not None:
                 pos_lidar, dist_lidar, num_pts = estimate_position_from_lidar(
                     lidar_points, T["T_lidar_to_color"], T["T_lidar_body"],
-                    self.K_color, bbox, self.img_w, self.img_h,
+                    self.K_color, sub_bbox, self.img_w, self.img_h,
                     self.sample_count, self.outlier_thresh,
                     self.ground_height, self.roof_height,
                     self.min_lidar_points,
@@ -167,13 +186,8 @@ class PersonTrackerNode:
                     position = pos_lidar
                     distance = dist_lidar
                     source = "lidar"
-                    m_noise = compute_measurement_noise(
-                        num_pts, source="lidar",
-                        min_points=self.min_lidar_points,
-                        max_points=self.max_lidar_points,
-                    )
 
-            # 2차: LiDAR 포인트 부족 시 Depth fallback (높은 측정 노이즈)
+            # 2차: LiDAR 부족 시 Depth fallback (원본 bbox 사용)
             if position is None and depth_image is not None:
                 pos_depth, dist_depth = estimate_position_from_depth(
                     depth_image, bbox, self.K_depth, T["T_depth_body"],
@@ -183,50 +197,47 @@ class PersonTrackerNode:
                     position = pos_depth
                     distance = dist_depth
                     source = "depth"
-                    m_noise = 0.5  # LiDAR(0.1~0.4)보다 높은 노이즈
 
             rospy.loginfo_throttle(1.0,
-                f"[DEBUG] bbox=({bbox[0]:.0f},{bbox[1]:.0f},{bbox[2]:.0f},{bbox[3]:.0f}) "
+                f"[TRACK] ID:{track_id} sub_bbox=({sub_bbox[0]:.0f},{sub_bbox[1]:.0f},"
+                f"{sub_bbox[2]:.0f},{sub_bbox[3]:.0f}) "
                 f"lidar_pts={num_pts} src={source} "
                 f"pos={position if position is None else f'({position[0]:.2f},{position[1]:.2f},{position[2]:.2f})'} "
-                f"dist={distance}")
+                f"dist={'None' if distance is None else f'{distance:.2f}'}")
 
             if position is not None:
-                detections.append((position, score, distance, m_noise))
+                self.store.update(track_id, position, stamp, score)
+                active_ids.add(track_id)
 
-        # 트래커 업데이트 (Kalman Filter predict + update)
-        n_before = len(self.tracker.tracks)
-        tracks = self.tracker.update(detections, stamp)
-        n_after = len(tracks)
-        rospy.loginfo_throttle(1.0,
-            f"[DEBUG] dets={len(detections)} tracks_before={n_before} tracks_after={n_after} "
-            f"ids=[{','.join(str(t.id) for t in tracks)}]")
+        # lost 트랙 처리 및 정리
+        self.store.mark_lost_and_prune(active_ids)
 
         # TrackedPersonArray 메시지 생성
         arr = TrackedPersonArray()
         arr.header.stamp = stamp
         arr.header.frame_id = "base_link"
 
-        for t in tracks:
+        all_tracks = self.store.get_all_tracks()
+        for tid, s in all_tracks:
             p = TrackedPerson()
             p.header.stamp = stamp
             p.header.frame_id = "base_link"
-            p.id = t.id
+            p.id = tid
             p.class_id = "person"
-            p.score = t.score
-            p.position.x = t.position[0]
-            p.position.y = t.position[1]
-            p.position.z = t.position[2]
-            p.velocity.x = t.velocity[0]
-            p.velocity.y = t.velocity[1]
-            p.velocity.z = t.velocity[2]
-            p.distance = np.linalg.norm(t.position[:2])
-            p.confidence = t.score
-            p.valid = t.valid
+            p.score = s.score
+            p.position.x = s.position[0]
+            p.position.y = s.position[1]
+            p.position.z = s.position[2]
+            p.velocity.x = s.velocity[0]
+            p.velocity.y = s.velocity[1]
+            p.velocity.z = s.velocity[2]
+            p.distance = s.distance
+            p.confidence = s.score
+            p.valid = s.valid
             arr.persons.append(p)
 
         self.pub.publish(arr)
-        self._publish_markers(tracks, stamp)
+        self._publish_markers(all_tracks, stamp)
 
     def _publish_markers(self, tracks, stamp):
         """RViz 시각화용 MarkerArray 발행."""
@@ -236,9 +247,12 @@ class PersonTrackerNode:
         ma = MarkerArray()
         marker_id = 0
 
-        for t in tracks:
-            speed = np.linalg.norm(t.velocity[:2])
-            dist = np.linalg.norm(t.position[:2])
+        for tid, s in tracks:
+            if not s.valid:
+                continue
+
+            speed = float(np.linalg.norm(s.velocity[:2]))
+            dist = s.distance
 
             # 위치 구체
             m = Marker()
@@ -248,9 +262,9 @@ class PersonTrackerNode:
             m.id = marker_id
             m.type = Marker.SPHERE
             m.action = Marker.ADD
-            m.pose.position.x = t.position[0]
-            m.pose.position.y = t.position[1]
-            m.pose.position.z = t.position[2]
+            m.pose.position.x = s.position[0]
+            m.pose.position.y = s.position[1]
+            m.pose.position.z = s.position[2]
             m.pose.orientation.w = 1.0
             m.scale.x = 0.4
             m.scale.y = 0.4
@@ -261,7 +275,7 @@ class PersonTrackerNode:
                 m.color.r, m.color.g, m.color.b = 1.0, 0.65, 0.0
             else:
                 m.color.r, m.color.g, m.color.b = 0.0, 1.0, 0.0
-            m.color.a = 1.0 if t.valid else 0.4
+            m.color.a = 1.0
             m.lifetime = rospy.Duration(0.5)
             ma.markers.append(m)
             marker_id += 1
@@ -274,13 +288,12 @@ class PersonTrackerNode:
             txt.id = marker_id
             txt.type = Marker.TEXT_VIEW_FACING
             txt.action = Marker.ADD
-            txt.pose.position.x = t.position[0]
-            txt.pose.position.y = t.position[1]
-            txt.pose.position.z = t.position[2] + 0.5
+            txt.pose.position.x = s.position[0]
+            txt.pose.position.y = s.position[1]
+            txt.pose.position.z = s.position[2] + 0.5
             txt.scale.z = 0.25
             txt.color.r = txt.color.g = txt.color.b = txt.color.a = 1.0
-            src = "KF" if t.hit_count > 1 else "new"
-            txt.text = f"ID:{t.id} D:{dist:.1f}m V:{speed:.1f}m/s [{src}]"
+            txt.text = f"ID:{tid} D:{dist:.1f}m V:{speed:.1f}m/s"
             txt.lifetime = rospy.Duration(0.5)
             ma.markers.append(txt)
             marker_id += 1
@@ -295,10 +308,10 @@ class PersonTrackerNode:
                 arrow.type = Marker.ARROW
                 arrow.action = Marker.ADD
                 arrow.points = [
-                    Point(t.position[0], t.position[1], t.position[2]),
-                    Point(t.position[0] + t.velocity[0],
-                          t.position[1] + t.velocity[1],
-                          t.position[2]),
+                    Point(s.position[0], s.position[1], s.position[2]),
+                    Point(s.position[0] + s.velocity[0],
+                          s.position[1] + s.velocity[1],
+                          s.position[2]),
                 ]
                 arrow.scale.x = 0.05
                 arrow.scale.y = 0.1

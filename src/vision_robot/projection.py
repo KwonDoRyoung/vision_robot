@@ -3,6 +3,48 @@
 import numpy as np
 
 
+def compute_sub_bbox(bbox, prev_distance=None,
+                     close_ratio=0.35, far_ratio=0.55,
+                     distance_threshold=2.0):
+    """거리 기반 서브 바운딩 박스 계산.
+
+    가까운 거리(0~2m): bbox가 크므로 배경 LiDAR 유입 → 작은 중심 영역
+    먼 거리(2m+): bbox가 작으므로 더 넓은 중심 영역 사용
+
+    Args:
+        bbox: (x1, y1, x2, y2) 원본 바운딩 박스
+        prev_distance: 이전 프레임 거리 (m), None이면 기본값 사용
+        close_ratio: 가까운 거리에서 bbox 대비 서브 박스 비율
+        far_ratio: 먼 거리에서 bbox 대비 서브 박스 비율
+        distance_threshold: 가까운/먼 거리 기준 (m)
+
+    Returns:
+        (x1, y1, x2, y2) 서브 바운딩 박스
+    """
+    x1, y1, x2, y2 = bbox
+    w = x2 - x1
+    h = y2 - y1
+    cx = (x1 + x2) * 0.5
+    cy = (y1 + y2) * 0.5
+
+    if prev_distance is not None and prev_distance < distance_threshold:
+        # 가까운 거리: 작은 중심 영역 (배경 LiDAR 배제)
+        ratio = close_ratio
+    else:
+        # 먼 거리 또는 첫 탐지: 넓은 중심 영역
+        ratio = far_ratio
+
+    sub_w = w * ratio
+    sub_h = h * ratio
+    # 약간 위쪽 (상체 중심, 다리/바닥 배제)
+    cy_shift = -h * 0.05
+
+    return (cx - sub_w * 0.5,
+            cy + cy_shift - sub_h * 0.5,
+            cx + sub_w * 0.5,
+            cy + cy_shift + sub_h * 0.5)
+
+
 def estimate_position_from_lidar(points_lidar, T_lidar_to_cam, T_lidar_body,
                                  K, bbox, img_w, img_h,
                                  sample_count=40, outlier_threshold=1.5,
