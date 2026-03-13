@@ -68,8 +68,15 @@ tracker:
   measurement_noise: 0.3    # KF 측정 노이즈
 
 # 회피 정책 (Phase 4)
+# 파이프라인: move_base → /cmd_vel_move → avoidance → /cmd_vel_safe → safety_node → /cmd_vel
 policy:
-  front_angle: 30.0         # 정면 영역 각도 (좌우 ±도)
-  distance_caution: 3.0     # 주의 거리 (m)
-  distance_warning: 2.0     # 경고 거리 (m)
-  distance_critical: 1.0    # 긴급 거리 (m)
+  input_cmd_topic: "/cmd_vel_move"    # move_base 출력
+  output_cmd_topic: "/cmd_vel_safe"   # safety_node 입력
+  front_angle: 30.0                   # 정면 영역 각도 (좌우 ±도)
+  distance_caution: 3.0               # 주의 거리 (m) - 감속
+  distance_warning: 2.0               # 경고 거리 (m) - 크게 감속 + 회전
+  distance_critical: 1.0              # 긴급 거리 (m) - 정지
+  speed_scale_caution: 0.6            # 주의 영역 속도 비율
+  speed_scale_warning: 0.3            # 경고 영역 속도 비율
+  max_angular_avoid: 0.5              # 회피 시 최대 회전 속도 (rad/s)
+  rate: 20                            # 정책 실행 주기 (Hz)
